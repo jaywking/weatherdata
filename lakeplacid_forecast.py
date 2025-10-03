@@ -65,14 +65,51 @@ def iso_to_et(s):
 def mph_from_wind_string(s):
     """
     NWS hourly windSpeed is often like '5 mph', '5 to 10 mph', or 'Calm'.
-    Return integer mph (average if a range).
+    Return integer mph (average if a range). Handles km/h if present.
     """
     if not s or s.strip().lower() == "calm":
         return 0
+    
+    s_lower = s.lower()
+    is_kmh = "km/h" in s_lower or "kmh" in s_lower
+    
     nums = list(map(int, re.findall(r"\d+", s)))
     if not nums:
         return 0
-    return int(round(sum(nums) / len(nums)))
+        
+    avg_val = sum(nums) / len(nums)
+    
+    if is_kmh:
+        return int(round(avg_val * 0.621371))
+    else: # Assume mph
+        return int(round(avg_val))
+
+def deg_to_cardinal(deg):
+    """Convert degrees to a 16-point compass direction (e.g., N, NNE)."""
+    if deg is None:
+        return None
+    try:
+        val = float(deg) % 360
+    except (TypeError, ValueError):
+        return None
+    directions = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    idx = int((val + 11.25) // 22.5) % 16
+    return directions[idx]
+
+def format_speed_imperial_metric(mph):
+    """Return speed as 'X mph (Y km/h)' when mph is provided."""
+    if mph is None:
+        return None
+    try:
+        if hasattr(mph, 'item'):
+            mph = mph.item()
+        mph_val = float(mph)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(mph_val):
+        return None
+    kmh = mph_val * 1.60934
+    return f"{int(round(mph_val))} mph ({int(round(kmh))} km/h)"
 
 def feels_like_f(temp_f, wind_mph, rh_pct):
     """
@@ -160,10 +197,14 @@ def latest_observation(points_json):
 
     p = obs
     when = iso_to_et(p.get("timestamp"))
-    temp_c = p.get("temperature", {}).get("value")  # in \u00B0C
+    temp_c = p.get("temperature", {}).get("value")  # in °C
     rh = p.get("relativeHumidity", {}).get("value")
-    wind_mps = p.get("windSpeed", {}).get("value")   # m/s
-    gust_mps = p.get("windGust", {}).get("value")    # m/s
+    wind_speed_obj = p.get("windSpeed", {})
+    wind_val = wind_speed_obj.get("value")
+    wind_unit = wind_speed_obj.get("unitCode", "")
+    gust_speed_obj = p.get("windGust", {})
+    gust_val = gust_speed_obj.get("value")
+    gust_unit = gust_speed_obj.get("unitCode", "")
     wdir = p.get("windDirection", {}).get("value")   # degrees
     vis_m = p.get("visibility", {}).get("value")     # meters
     text = p.get("textDescription")
@@ -171,8 +212,19 @@ def latest_observation(points_json):
 
     # Conversions
     temp_f = None if temp_c is None else (temp_c * 9/5 + 32)
-    wind_mph = None if wind_mps is None else wind_mps * 2.23694
-    gust_mph = None if gust_mps is None else gust_mps * 2.23694
+    wind_mph = None
+    if wind_val is not None:
+        if wind_unit and "km_h" in wind_unit:
+            wind_mph = wind_val * 0.621371  # km/h to mph
+        else:
+            wind_mph = wind_val * 2.23694      # m/s to mph (legacy)
+
+    gust_mph = None
+    if gust_val is not None:
+        if gust_unit and "km_h" in gust_unit:
+            gust_mph = gust_val * 0.621371  # km/h to mph
+        else:
+            gust_mph = gust_val * 2.23694      # m/s to mph (legacy)
     vis_mi = None if vis_m is None else vis_m / 1609.34
 
     return {
@@ -269,10 +321,15 @@ def grid_supplement(points_json):
 # BUILD TABLES
 # ----------------------------
 def build_site_package(name, lat, lon, now_et):
+    print("  Fetching NWS data points...")
     pts = get_points(lat, lon)
+    print("  Fetching latest observation...")
     obs = latest_observation(pts)
+    print("  Fetching hourly forecast...")
     df_hourly = hourly_forecast(pts)               # temp_f, wind_mph, gust_mph, wind_dir_text, rh, pop, cloud(None)
+    print("  Fetching grid supplement data...")
     df_grid   = grid_supplement(pts)               # skyCover, apparentTemperature, windGust (maybe)
+    print("  Processing and combining data...")
     # Combine
     df = df_hourly.join(df_grid, how="left")
 
@@ -298,7 +355,8 @@ def build_site_package(name, lat, lon, now_et):
 
     # If gust missing, use grid gust if present
     if "windGust" in df.columns:
-        df["gust_mph"] = df["gust_mph"].fillna(df["windGust"])
+        gust_missing = df["gust_mph"].isna()
+        df.loc[gust_missing, "gust_mph"] = df.loc[gust_missing, "windGust"]
 
     # Conversions + rounding to whole numbers
     df["temp_c"]  = ((df["temp_f"] - 32) * 5/9)
@@ -410,9 +468,12 @@ def narrative_from_tables(short_imp_df):
     sky = "mostly clear" if cloud_mid <= 25 else ("partly cloudy" if cloud_mid <= 60 else "mostly cloudy")
     precip = "dry" if popmax <= 10 else ("a slight chance of showers" if popmax <= 30 else "showers possible")
 
-    wind_narrative = f"Winds generally around {avg_wind} mph"
+    avg_kmh = int(round(avg_wind * 1.60934))
+    gust_kmh = int(round(gusts * 1.60934)) if gusts > 0 else 0
+
+    wind_narrative = f"Winds generally around {avg_wind} mph ({avg_kmh} km/h)"
     if gusts > 0:
-        wind_narrative += f" with gusts up to ~{gusts} mph."
+        wind_narrative += f" with gusts up to ~{gusts} mph ({gust_kmh} km/h)."
     else:
         wind_narrative += "."
 
@@ -435,13 +496,25 @@ def save_whatsapp_summary(pkg_dhi, pkg_xc, txt_path, stamp_human=None):
         if curr:
             temp_str = f"{curr['temp_c']} \u00B0C / {curr['temp_f']} \u00B0F" if curr['temp_c'] is not None else "Not available"
             rh_str = f"{curr['rh']}%" if curr['rh'] is not None else "Not available"
-            wind = f"{curr['wind_mph']} mph" if curr['wind_mph'] is not None else "-"
-            gust = f", gusting {curr['gust_mph']} mph" if curr['gust_mph'] else ""
-            wdir = f" from {curr['wind_dir_deg']}\u00B0" if curr['wind_dir_deg'] is not None else ""
+            wind_value = curr['wind_mph']
+            wind_base = None if wind_value is None or pd.isna(wind_value) else format_speed_imperial_metric(wind_value)
+            direction = deg_to_cardinal(curr['wind_dir_deg'])
+            gust_value = curr['gust_mph']
+            gust_str = None
+            if gust_value is not None and not pd.isna(gust_value) and gust_value != 0:
+                gust_str = format_speed_imperial_metric(gust_value)
+            wind_parts = []
+            if wind_base:
+                wind_parts.append(wind_base)
+            if direction and wind_base:
+                wind_parts.append(f"from {direction}")
+            if gust_str:
+                wind_parts.append(f"gusting {gust_str}")
+            wind_line = ', '.join(wind_parts) if wind_parts else '-'
             wa.extend([
                 f"- Conditions: {curr['conditions']}",
                 f"- Temp: {temp_str}",
-                f"- Wind: {wind}{gust}{wdir}",
+                f"- Wind: {wind_line}",
                 f"- RH: {rh_str}",
             ])
         else:
@@ -459,6 +532,58 @@ def save_whatsapp_summary(pkg_dhi, pkg_xc, txt_path, stamp_human=None):
         f.write(section(pkg_dhi))
         f.write("\n\n---\n\n")
         f.write(section(pkg_xc))
+
+
+def save_whatsapp_combined(pkg_primary, pkg_secondary, txt_path, stamp_human=None):
+    packages = [pkg_primary, pkg_secondary]
+    stamp_to_use = stamp_human or STAMP_HUMAN
+
+    lines = []
+    lines.append('*Lake Placid Area Forecast*')
+    lines.append(f'_{stamp_to_use}_')
+    lines.append('')
+    lines.append('*Current Conditions*')
+    for pkg in packages:
+        name = pkg['name']
+        curr = pkg['current']
+        lines.append(f"- *{name}*:")
+        if curr:
+            temp_str = 'Not available' if curr['temp_c'] is None or curr['temp_f'] is None else f"{curr['temp_c']} \u00B0C / {curr['temp_f']} \u00B0F"
+            rh_str = 'Not available' if curr['rh'] is None else f"{curr['rh']}%"
+            wind_value = curr['wind_mph']
+            wind_base = None if wind_value is None or pd.isna(wind_value) else format_speed_imperial_metric(wind_value)
+            direction = deg_to_cardinal(curr['wind_dir_deg'])
+            gust_value = curr['gust_mph']
+            gust_str = None
+            if gust_value is not None and not pd.isna(gust_value) and gust_value != 0:
+                gust_str = format_speed_imperial_metric(gust_value)
+            wind_parts = []
+            if wind_base:
+                wind_parts.append(wind_base)
+            if direction and wind_base:
+                wind_parts.append(f"from {direction}")
+            if gust_str:
+                wind_parts.append(f"gusting {gust_str}")
+            wind_str = ', '.join(wind_parts) if wind_parts else '-'
+            lines.append(f"  {curr['conditions']};")
+            lines.append(f"  Temp: {temp_str};")
+            lines.append(f"  Wind: {wind_str};")
+            lines.append(f"  RH: {rh_str}.")
+        else:
+            lines.append('  No recent observation available from nearest station.')
+        lines.append(f"  Source: {pkg['source_url']}")
+        lines.append('')
+
+    lines.append('*Short-term Forecast (36h)*')
+    for pkg in packages:
+        lines.append(f"- *{pkg['name']}*")
+        for detail in narrative_from_tables(pkg['short_imper']):
+            lines.append(f"  - {detail}")
+
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(line for line in lines if line is not None))
+
+
 def save_markdown(pkg_dhi, pkg_xc, md_path):
     def section(pkg):
         name = pkg["name"]
@@ -539,68 +664,93 @@ def build_pdf_full(pkg_dhi, pkg_xc, pdf_path):
         ]))
         return table
 
-    def add_site(elements, pkg):
-        elements.append(Paragraph(pkg["name"], styles["SubHeading"]))
-        elements.append(Paragraph("Current Conditions", styles["SubHeading"]))
+    def current_conditions_block(pkg):
+        curr = pkg["current"]
+        lines = [f"<b>{pkg['name']}</b>:"]
+        if curr:
+            conditions = (curr.get("conditions") or "-") + ';'
+            temp_c = curr.get("temp_c")
+            temp_f = curr.get("temp_f")
+            temp_available = temp_c is not None and not pd.isna(temp_c) and temp_f is not None and not pd.isna(temp_f)
+            temp_line = f"Temp: {temp_c} °C / {temp_f} °F;" if temp_available else "Temp: Not available;"
 
-        c = pkg["current"]
-        if c:
-            lines = [
-                f"Observed at {c['observed_at']}",
-                f"Conditions: {c['conditions']}",
-                f"Temp: {c['temp_c']} \u00B0C / {c['temp_f']} \u00B0F",
-                f"Wind: {c['wind_mph']} mph{', gusting ' + str(c['gust_mph']) + ' mph' if c['gust_mph'] else ''}{' from ' + str(c['wind_dir_deg']) + '\u00B0' if c['wind_dir_deg'] is not None else ''}",
-                f"RH: {c['rh']}%",
-                f"Alerts: {pkg['alert_note']}",
-                f'Source: <a href="{pkg["source_url"]}">NWS Gridpoint & Stations</a>'
-            ]
-            for ln in lines:
-                elements.append(Paragraph(ln, styles["NormalSmall"]))
+            wind_val = curr.get("wind_mph")
+            wind_base = None if wind_val is None or pd.isna(wind_val) else format_speed_imperial_metric(wind_val)
+            dir_val = curr.get("wind_dir_deg")
+            direction = deg_to_cardinal(dir_val) if dir_val is not None and not pd.isna(dir_val) else None
+            gust_val = curr.get("gust_mph")
+            gust_str = None
+            if gust_val is not None and not pd.isna(gust_val) and gust_val != 0:
+                gust_str = format_speed_imperial_metric(gust_val)
+            wind_parts = []
+            if wind_base:
+                wind_parts.append(wind_base)
+            if direction and wind_base:
+                wind_parts.append(f"from {direction}")
+            if gust_str:
+                wind_parts.append(f"gusting {gust_str}")
+            wind_line = f"Wind: {', '.join(wind_parts)};" if wind_parts else "Wind: -;"
+
+            rh_val = curr.get("rh")
+            rh_line = f"RH: {int(rh_val)}%." if rh_val is not None and not pd.isna(rh_val) else "RH: Not available."
+
+            lines.extend([conditions, temp_line, wind_line, rh_line])
         else:
-            elements.append(Paragraph("_No recent observation available from nearest station._", styles["NormalSmall"]))
+            lines.append("No recent observation available from nearest station.")
+        source_url = pkg.get("source_url")
+        if source_url:
+            lines.append(f'Source: <a href="{source_url}">{source_url}</a>')
+        return "<br/>".join(lines)
 
-        elements.append(Spacer(1, 6))
-        elements.append(Paragraph("Short-term Forecast (36 Hours, Narrative)", styles["SubHeading"]))
-        for ln in narrative_from_tables(pkg["short_imper"]):
-            elements.append(Paragraph("• " + ln, styles["NormalSmall"]))
-        elements.append(Spacer(1, 4))
-
-        # Short-term tables
-        elements.append(Paragraph("Metric (\u00B0C, km/h)", styles["NormalSmall"]))
-        elements.append(make_table(pkg["short_metric"],
-               ["Date/Time (EDT)","Temp (\u00B0C)","Feels (\u00B0C)","Wind (km/h)","Gusts (km/h)","Dir","RH (%)","PoP (%)","Cloud (%)"],
-               [80,45,45,60,60,35,35,35,40]))
-        elements.append(Spacer(1, 6))
-        elements.append(Paragraph("Imperial (\u00B0F, mph)", styles["NormalSmall"]))
-        elements.append(make_table(pkg["short_imper"],
-               ["Date/Time (EDT)","Temp (\u00B0F)","Feels (\u00B0F)","Wind (mph)","Gusts (mph)","Dir","RH (%)","PoP (%)","Cloud (%)"],
-               [80,45,45,60,60,35,35,35,40]))
-        elements.append(Spacer(1, 10))
-
-        # 7-day tables
-        elements.append(Paragraph("Extended Forecast (7-Day)", styles["SubHeading"]))
-        elements.append(Paragraph("Metric (\u00B0C, km/h)", styles["NormalSmall"]))
-        elements.append(make_table(pkg["long_metric"],
-               ["Date/Time (EDT)","Temp (\u00B0C)","Feels (\u00B0C)","Wind (km/h)","Gusts (km/h)","Dir","RH (%)","PoP (%)","Cloud (%)"],
-               [80,45,45,60,60,35,35,35,40]))
-        elements.append(Spacer(1, 6))
-        elements.append(Paragraph("Imperial (\u00B0F, mph)", styles["NormalSmall"]))
-        elements.append(make_table(pkg["long_imper"],
-               ["Date/Time (EDT)","Temp (\u00B0F)","Feels (\u00B0F)","Wind (mph)","Gusts (mph)","Dir","RH (%)","PoP (%)","Cloud (%)"],
-               [80,45,45,60,60,35,35,35,40]))
-        elements.append(PageBreak())
+    packages = [pkg_dhi, pkg_xc]
 
     elements = []
     doc = SimpleDocTemplate(pdf_path, pagesize=(8.5*inch, 11*inch),
                             rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     elements.append(Paragraph(STAMP_HUMAN, styles["StampRight"]))
-    elements.append(Paragraph("Weather / Forecasts – Lake Placid Area", styles["Heading"]))
+    elements.append(Paragraph("Weather / Forecasts - Lake Placid Area", styles["Heading"]))
     end_date_str = (now_et + timedelta(days=7)).strftime('%b %d, %Y')
     elements.append(Paragraph(f"Valid through {end_date_str}", styles["NormalSmall"]))
     elements.append(Spacer(1, 12))
 
-    add_site(elements, pkg_dhi)
-    add_site(elements, pkg_xc)
+    elements.append(Paragraph("Current Conditions", styles["SubHeading"]))
+    for pkg in packages:
+        elements.append(Paragraph(current_conditions_block(pkg), styles["NormalSmall"]))
+        elements.append(Spacer(1, 6))
+
+    elements.append(Paragraph("Short-term Forecast (36 Hours, Narrative)", styles["SubHeading"]))
+    for pkg in packages:
+        elements.append(Paragraph(f"<b>{pkg['name']}</b>", styles["NormalSmall"]))
+        for detail in narrative_from_tables(pkg["short_imper"]):
+            elements.append(Paragraph(f"&nbsp;&nbsp;- {detail}", styles["NormalSmall"]))
+        elements.append(Spacer(1, 6))
+
+    elements.append(Paragraph("Short-term Tables (36 Hours)", styles["SubHeading"]))
+    for pkg in packages:
+        elements.append(Paragraph(f"{pkg['name']} - Metric (°C, km/h)", styles["NormalSmall"]))
+        elements.append(make_table(pkg["short_metric"],
+               ["Date/Time (EDT)","Temp (°C)","Feels (°C)","Wind (km/h)","Gusts (km/h)","Dir","RH (%)","PoP (%)","Cloud (%)"],
+               [80,45,45,60,60,35,35,35,40]))
+        elements.append(Spacer(1, 6))
+        elements.append(Paragraph(f"{pkg['name']} - Imperial (°F, mph)", styles["NormalSmall"]))
+        elements.append(make_table(pkg["short_imper"],
+               ["Date/Time (EDT)","Temp (°F)","Feels (°F)","Wind (mph)","Gusts (mph)","Dir","RH (%)","PoP (%)","Cloud (%)"],
+               [80,45,45,60,60,35,35,35,40]))
+        elements.append(Spacer(1, 10))
+
+    elements.append(Paragraph("Extended Forecast (7-Day)", styles["SubHeading"]))
+    for pkg in packages:
+        elements.append(Paragraph(f"{pkg['name']} - Metric (°C, km/h)", styles["NormalSmall"]))
+        elements.append(make_table(pkg["long_metric"],
+               ["Date/Time (EDT)","Temp (°C)","Feels (°C)","Wind (km/h)","Gusts (km/h)","Dir","RH (%)","PoP (%)","Cloud (%)"],
+               [80,45,45,60,60,35,35,35,40]))
+        elements.append(Spacer(1, 6))
+        elements.append(Paragraph(f"{pkg['name']} - Imperial (°F, mph)", styles["NormalSmall"]))
+        elements.append(make_table(pkg["long_imper"],
+               ["Date/Time (EDT)","Temp (°F)","Feels (°F)","Wind (mph)","Gusts (mph)","Dir","RH (%)","PoP (%)","Cloud (%)"],
+               [80,45,45,60,60,35,35,35,40]))
+        elements.append(Spacer(1, 10))
+
     doc.build(elements)
 
 def build_pdf_summary(pkg_dhi, pkg_xc, pdf_path):
@@ -610,58 +760,86 @@ def build_pdf_summary(pkg_dhi, pkg_xc, pdf_path):
     styles.add(ParagraphStyle(name="NormalSmall", fontSize=8, leading=10, spaceAfter=5))
     styles.add(ParagraphStyle(name="StampRight", fontSize=8, leading=10, alignment=2, textColor=colors.grey))
 
-    def add_site(elements, pkg):
-        elements.append(Paragraph(pkg["name"], styles["SubHeading"]))
-        elements.append(Paragraph("Current Conditions", styles["SubHeading"]))
-        c = pkg["current"]
-        if c:
-            wind_str = f"{c['wind_mph']} mph"
-            if c['gust_mph']:
-                wind_str += f", gusting {c['gust_mph']} mph"
-            if c['wind_dir_deg'] is not None:
-                wind_str += f" from {c['wind_dir_deg']}\u00B0"
+    def current_conditions_block(pkg):
+        curr = pkg["current"]
+        lines = [f"<b>{pkg['name']}</b>:"]
+        if curr:
+            conditions = (curr.get("conditions") or "-") + ';'
+            temp_c = curr.get("temp_c")
+            temp_f = curr.get("temp_f")
+            temp_available = temp_c is not None and not pd.isna(temp_c) and temp_f is not None and not pd.isna(temp_f)
+            temp_line = f"Temp: {temp_c} °C / {temp_f} °F;" if temp_available else "Temp: Not available;"
 
-            lines = [
-                f"Observed at {c['observed_at']}",
-                f"Conditions: {c['conditions']}",
-                f"Temp: {c['temp_c']} \u00B0C / {c['temp_f']} \u00B0F",
-                f"Wind: {wind_str}",
-                f"RH: {c['rh']}%",
-                f"Alerts: {pkg['alert_note']}",
-                f'Source: <a href="{pkg["source_url"]}">NWS Gridpoint & Stations</a>'
-            ]
+            wind_val = curr.get("wind_mph")
+            wind_base = None if wind_val is None or pd.isna(wind_val) else format_speed_imperial_metric(wind_val)
+            dir_val = curr.get("wind_dir_deg")
+            direction = deg_to_cardinal(dir_val) if dir_val is not None and not pd.isna(dir_val) else None
+            gust_val = curr.get("gust_mph")
+            gust_str = None
+            if gust_val is not None and not pd.isna(gust_val) and gust_val != 0:
+                gust_str = format_speed_imperial_metric(gust_val)
+            wind_parts = []
+            if wind_base:
+                wind_parts.append(wind_base)
+            if direction and wind_base:
+                wind_parts.append(f"from {direction}")
+            if gust_str:
+                wind_parts.append(f"gusting {gust_str}")
+            wind_line = f"Wind: {', '.join(wind_parts)};" if wind_parts else "Wind: -;"
+
+            rh_val = curr.get("rh")
+            rh_line = f"RH: {int(rh_val)}%." if rh_val is not None and not pd.isna(rh_val) else "RH: Not available."
+
+            lines.extend([conditions, temp_line, wind_line, rh_line])
         else:
-            lines = ["No recent observation available from nearest station."]
-        for ln in lines:
-            elements.append(Paragraph(ln, styles["NormalSmall"]))
-        elements.append(Spacer(1, 6))
+            lines.append("No recent observation available from nearest station.")
+        source_url = pkg.get("source_url")
+        if source_url:
+            lines.append(f'Source: <a href="{source_url}">{source_url}</a>')
+        return "<br/>".join(lines)
 
-        elements.append(Paragraph("Short-term Forecast (36 Hours, Narrative)", styles["SubHeading"]))
-        for ln in narrative_from_tables(pkg["short_imper"]):
-            elements.append(Paragraph("• " + ln, styles["NormalSmall"]))
-        elements.append(Spacer(1, 12))
+    packages = [pkg_dhi, pkg_xc]
 
     elements = []
     doc = SimpleDocTemplate(pdf_path, pagesize=(8.5*inch, 11*inch),
                             rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     elements.append(Paragraph(STAMP_HUMAN, styles["StampRight"]))
-    elements.append(Paragraph("Weather / Forecasts – Lake Placid Area", styles["Heading"]))
+    elements.append(Paragraph("Weather / Forecasts - Lake Placid Area", styles["Heading"]))
     end_date_str = (now_et + timedelta(days=7)).strftime('%b %d, %Y')
     elements.append(Paragraph(f"Valid through {end_date_str}", styles["NormalSmall"]))
     elements.append(Spacer(1, 12))
 
-    add_site(elements, pkg_dhi)
-    add_site(elements, pkg_xc)
+    elements.append(Paragraph("Current Conditions", styles["SubHeading"]))
+    for pkg in packages:
+        elements.append(Paragraph(current_conditions_block(pkg), styles["NormalSmall"]))
+        elements.append(Spacer(1, 6))
+
+    elements.append(Paragraph("Short-term Forecast (36 Hours, Narrative)", styles["SubHeading"]))
+    for pkg in packages:
+        elements.append(Paragraph(f"<b>{pkg['name']}</b>", styles["NormalSmall"]))
+        for detail in narrative_from_tables(pkg["short_imper"]):
+            elements.append(Paragraph(f"&nbsp;&nbsp;- {detail}", styles["NormalSmall"]))
+        elements.append(Spacer(1, 12))
+
     doc.build(elements)
+
 
 # ----------------------------
 # MAIN
 # ----------------------------
 def main():
+    total_tasks = 8
+    task_num = 1
+    print("Starting forecast generation...")
     try:
         # Build packages for both sites
+        print(f"[{task_num}/{total_tasks}] Building data package for DHI – Mt. Whiteface Base...")
         pkg_dhi = build_site_package("DHI – Mt. Whiteface Base", SITES["DHI – Mt. Whiteface Base"]["lat"], SITES["DHI – Mt. Whiteface Base"]["lon"], now_et)
+        task_num += 1
+
+        print(f"[{task_num}/{total_tasks}] Building data package for XC – Mt. Hoevenburg Base...")
         pkg_xc  = build_site_package("XC – Mt. Hoevenburg Base", SITES["XC – Mt. Hoevenburg Base"]["lat"],  SITES["XC – Mt. Hoevenburg Base"]["lon"], now_et)
+        task_num += 1
 
         # Create output directory
         output_dir = os.path.join("Forecasts", STAMP_TAG)
@@ -670,25 +848,41 @@ def main():
         base = f"Lake_Placid_Forecast_{STAMP_TAG}"
 
         # WhatsApp Summary
+        print(f"[{task_num}/{total_tasks}] Generating WhatsApp summary...")
         wa_path = os.path.join(output_dir, f"{base}_Whatsapp.txt")
         save_whatsapp_summary(pkg_dhi, pkg_xc, wa_path)
+        task_num += 1
+
+        print(f"[{task_num}/{total_tasks}] Generating combined WhatsApp summary...")
+        wa_combined_path = os.path.join(output_dir, f"{base}_Whatsapp_Combined.txt")
+        save_whatsapp_combined(pkg_dhi, pkg_xc, wa_combined_path)
+        task_num += 1
 
         # Markdown
+        print(f"[{task_num}/{total_tasks}] Generating Markdown report...")
         md_path = os.path.join(output_dir, f"{base}_Full.md")
         save_markdown(pkg_dhi, pkg_xc, md_path)
+        task_num += 1
 
         # Excel
+        print(f"[{task_num}/{total_tasks}] Generating Excel report...")
         xlsx_path = os.path.join(output_dir, f"{base}_Full.xlsx")
         save_excel(pkg_dhi, pkg_xc, xlsx_path)
+        task_num += 1
 
         # PDFs
+        print(f"[{task_num}/{total_tasks}] Generating full PDF report...")
         pdf_full = os.path.join(output_dir, f"Lake_Placid_Forecast_With_Tables_{STAMP_TAG}.pdf")
-        pdf_sum  = os.path.join(output_dir, f"Lake_Placid_Forecast_Summary_{STAMP_TAG}.pdf")
         build_pdf_full(pkg_dhi, pkg_xc, pdf_full)
+        task_num += 1
+        
+        print(f"[{task_num}/{total_tasks}] Generating summary PDF report...")
+        pdf_sum  = os.path.join(output_dir, f"Lake_Placid_Forecast_Summary_{STAMP_TAG}.pdf")
         build_pdf_summary(pkg_dhi, pkg_xc, pdf_sum)
 
         print("\nDone. Files created in:", output_dir)
         print("  ", wa_path)
+        print("  ", wa_combined_path)
         print("  ", md_path)
         print("  ", xlsx_path)
         print("  ", pdf_full)

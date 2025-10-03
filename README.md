@@ -8,6 +8,7 @@ A Python utility that pulls National Weather Service (NWS/NOAA) data and produce
 - Builds consolidated metric and imperial tables for the next 36 hours and seven days.
 - Exports WhatsApp-friendly text, Markdown, Excel, and PDF summaries in one run.
 - Uses a consistent file naming scheme with Eastern Time (ET) timestamps for easy archiving.
+- Provides real-time progress updates during execution.
 
 ## Requirements
 
@@ -33,6 +34,7 @@ python lakeplacid_forecast.py
 The script pulls data for the configured sites and creates a timestamped folder under `Forecasts/` containing:
 
 - `*_Whatsapp.txt` – short-form narrative and current conditions per site.
+- `*_Whatsapp_Combined.txt` – single message covering both sites with source links.
 - `*_Full.md` – comprehensive Markdown report with metric and imperial tables.
 - `*_Full.xlsx` – Excel workbook with site sheets and a metadata tab.
 - `Lake_Placid_Forecast_With_Tables_*.pdf` – printable full report.
@@ -56,6 +58,13 @@ Key customisations live at the top of `lakeplacid_forecast.py`:
 - Ensure outbound network access to `api.weather.gov`.
 - If you see pandas `FutureWarning` messages during execution, the run still completes; future library updates may require small adjustments.
 - ReportLab requires system fonts capable of rendering the bullet and degree symbols; the defaults on most systems suffice.
+
+## Changelog
+
+### 2025-10-03
+- **Fix**: Corrected wind speed calculation for current observations to handle km/h units from the NWS API, resolving data inaccuracies.
+- **Enhancement**: Added progress indicators to provide real-time feedback during script execution.
+- **Enhancement**: Improved robustness of hourly forecast parsing to handle different wind speed units.
 
 ## Contributing
 
