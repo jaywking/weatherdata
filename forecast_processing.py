@@ -59,7 +59,8 @@ def build_site_package(name, lat, lon, now_et):
         rh = row.get("rh")
         app_f = row.get("apparentTemperature")
         if app_f is not None and not pd.isna(app_f):
-            feels_f = app_f
+            # ASSUME APPARENT TEMP IS IN °C FROM NWS
+            feels_f = (app_f * 9/5) + 32
         else:
             feels_f = feels_like_f(temp_f, wind_mph, rh) if temp_f is not None else None
         feels_f_list.append(feels_f)
@@ -87,9 +88,9 @@ def build_site_package(name, lat, lon, now_et):
     out = pd.DataFrame(index=df.index)
     out["Date/Time (EDT)"] = [ts.strftime("%b %d %H:%M") for ts in df.index]
     out["Temp (°C)"]       = df["temp_c"]
-    out["Feels (°C)"]      = df["feels_c"]
-    out["Wind (km/h)"]     = (df["wind_mph"] * 1.609).round().astype("Int64")
-    out["Gusts (km/h)"]    = (df["gust_mph"] * 1.609).round().astype("Int64")
+    out["Feels\nLike (°C)"]      = df["feels_c"]
+    out["Wind\n(km/h)"]     = (df["wind_mph"] * 1.609).round().astype("Int64")
+    out["Gusts\n(km/h)"]    = (df["gust_mph"] * 1.609).round().astype("Int64")
     out["Dir"]             = df.get("wind_dir_text", pd.Series(index=df.index, dtype="object")).fillna("")
     out["RH (%)"]          = df["rh"]
     out["PoP (%)"]         = df["pop"]
@@ -99,9 +100,9 @@ def build_site_package(name, lat, lon, now_et):
     out_imp = pd.DataFrame(index=df.index)
     out_imp["Date/Time (EDT)"] = out["Date/Time (EDT)"]
     out_imp["Temp (°F)"]       = df["temp_f"]
-    out_imp["Feels (°F)"]      = df["feels_f"]
-    out_imp["Wind (mph)"]      = df["wind_mph"]
-    out_imp["Gusts (mph)"]     = df["gust_mph"]
+    out_imp["Feels\nLike (°F)"]      = df["feels_f"]
+    out_imp["Wind\n(mph)"]      = df["wind_mph"]
+    out_imp["Gusts\n(mph)"]     = df["gust_mph"]
     out_imp["Dir"]             = out["Dir"]
     out_imp["RH (%)"]          = out["RH (%)"] if "RH (%)" in out.columns else df["rh"]
     out_imp["PoP (%)"]         = out["PoP (%)"] if "PoP (%)" in out.columns else df["pop"]
@@ -171,12 +172,12 @@ def build_site_package(name, lat, lon, now_et):
 def narrative_from_tables(short_imp_df):
     if short_imp_df.empty:
         return [
-            "Limited short-term data available from NWS at this time."
+            "- Limited short-term data available from NWS at this time."
         ]
     hi = int(short_imp_df["Temp (°F)"].max())
     lo = int(short_imp_df["Temp (°F)"].min())
-    avg_wind = int(short_imp_df["Wind (mph)"].fillna(0).mean())
-    gusts = int(short_imp_df["Gusts (mph)"].fillna(0).max())
+    avg_wind = int(short_imp_df["Wind\n(mph)"].fillna(0).mean())
+    gusts = int(short_imp_df["Gusts\n(mph)"].fillna(0).max())
     popmax = int(short_imp_df["PoP (%)"].fillna(0).max())
     cloud_mid = int(short_imp_df["Cloud (%)"].dropna().median()) if short_imp_df["Cloud (%)"].notna().any() else 0
 
@@ -193,7 +194,7 @@ def narrative_from_tables(short_imp_df):
         wind_narrative += "."
 
     return [
-        f"Next 36 hours: {sky} and {precip}.",
-        f"Temperatures range from about {lo}–{hi} °F ({round((lo-32)*5/9)}–{round((hi-32)*5/9)} °C).",
-        wind_narrative,
+        f"- Next 36 hours: {sky} and {precip}.",
+        f"- Temperatures range from about {lo}–{hi} °F ({round((lo-32)*5/9)}–{round((hi-32)*5/9)} °C).",
+        f"- {wind_narrative}",
     ]
